@@ -6,7 +6,7 @@ The script is based on 3 parameters:
 
 -DisableNewSessions: Which disables all New Connections on all sessions hosts provided in the Sessionshosts.txt file
 
-When running -DisableNewSessions a mandatory Paramter called -Disconnect asks if you want to Disconnect All sesssions on the hosts or only Disconnected sesssions.
+When running -DisableNewSessions a mandatory Parameter called -Disconnect asks if you want to Disconnect All sesssions on the hosts or only Disconnected sesssions.
 
 -Disconnect All/Disconnected
 
