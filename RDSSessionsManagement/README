@@ -1,1 +1,13 @@
+This scripts is intended to easily enable or disable New RDS Connections to session hosts. 
 
+The script is based on 3 parameters:
+
+-EnableNewSessions: Which enables New connections on all session hosts provided in the Sessionshosts.txt file
+
+-DisableNewSessions: Which disables all New Connections on all sessions hosts provided in the Sessionshosts.txt file
+
+When running -DisableNewSessions a mandatory Paramter called -Disconnect asks if you want to Disconnect All sesssions on the hosts or only Disconnected sesssions.
+
+-Disconnect All/Disconnected
+
+The Script needs to look at a SessionsHosts.txt file that has a line seperated .txt file. Be sure to change the $servers variable in the script to the given hosts file
