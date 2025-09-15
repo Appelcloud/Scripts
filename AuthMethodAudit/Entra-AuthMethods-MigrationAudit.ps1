@@ -50,7 +50,15 @@ param(
     
     # Optional: read policy status (requires Policy.Read.All)
     [Parameter(Mandatory=$false)]
-    [switch]$IncludePolicyStatus = $false
+    [switch]$IncludePolicyStatus = $false,
+
+    # Reduce console chatter during execution
+    [Parameter(Mandatory=$false)]
+    [switch]$Quiet = $false
+    ,
+    # Show detailed progress like user counts and resource discovery
+    [Parameter(Mandatory=$false)]
+    [switch]$ShowDetails = $false
 )
 
 # Script configuration
@@ -58,6 +66,8 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 $Script:TimeStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $Script:ReportDate = Get-Date -Format "MMMM dd, yyyy HH:mm"
+$Script:IsQuiet = [bool]$Quiet
+$Script:ShowDetails = [bool]$ShowDetails
 
 # Color codes for console output
 $Script:Colors = @{
@@ -75,6 +85,12 @@ function Write-ColorOutput {
         [string]$Message,
         [string]$Color = "White"
     )
+    # Quiet mode: only show important lines
+    if ($Script:IsQuiet) {
+        $alwaysShow = ($Message -match 'AUDIT COMPLETE|MIGRATION READINESS SUMMARY')
+        $isImportant = ($Color -eq $Script:Colors.Error -or $Color -eq $Script:Colors.Warning)
+        if (-not ($alwaysShow -or $isImportant)) { return }
+    }
     Write-Host $Message -ForegroundColor $Color
 }
 
@@ -144,7 +160,8 @@ function Connect-MicrosoftGraph {
             "User.Read.All",
             "UserAuthenticationMethod.Read.All",
             "Reports.Read.All",
-            "Organization.Read.All"
+            "Organization.Read.All",
+            "Policy.Read.All"  # Needed to read authentication methods policy/configurations
         )
         if ($IncludePolicyStatus) { $requiredScopes += "Policy.Read.All" }
         if (-not $IncludeResources) { $requiredScopes += "Place.Read.All" }
@@ -188,6 +205,76 @@ function Connect-MicrosoftGraph {
 
 #region Data Collection Functions
 
+function Get-ModernAuthMethodConfigurations {
+    Write-ColorOutput "`n=== Reading Modern Authentication Methods Policy ===" -Color $Script:Colors.Header
+    $rawMap = @{}
+    $items = @()
+    try {
+        # Preferred: use $expand on the policy
+        $resp = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy?`$expand=authenticationMethodConfigurations" -ErrorAction Stop
+        $configs = @()
+        if ($resp.authenticationMethodConfigurations) { $configs = $resp.authenticationMethodConfigurations }
+        
+        # Fallback: try direct collection endpoint
+        if (-not $configs -or $configs.Count -eq 0) {
+            try {
+                $uri = "https://graph.microsoft.com/beta/policies/authenticationMethodsPolicy/authenticationMethodConfigurations"
+                do {
+                    $r2 = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
+                    if ($r2.value) { $configs += $r2.value }
+                    $uri = $r2.'@odata.nextLink'
+                } while ($uri)
+            } catch { }
+        }
+
+        foreach ($cfg in $configs) {
+            $id = $null; $state = $null; $includeTargets = @(); $excludeTargets = @()
+            try { $id = $cfg.id } catch {}
+            try { $state = $cfg.state } catch {}
+            if (-not $id -and $cfg.AdditionalProperties) { $id = $cfg.AdditionalProperties.id }
+            if (-not $state -and $cfg.AdditionalProperties) { $state = $cfg.AdditionalProperties.state }
+            try { $includeTargets = $cfg.includeTargets } catch {}
+            try { $excludeTargets = $cfg.excludeTargets } catch {}
+            if ($id) {
+                $rawMap[$id] = $state
+                $items += [PSCustomObject]@{
+                    Id = $id
+                    State = $state
+                    IncludeTargetsCount = @($includeTargets).Count
+                    ExcludeTargetsCount = @($excludeTargets).Count
+                }
+            }
+        }
+
+        $friendly = @{}
+        foreach ($k in $rawMap.Keys) {
+            $name = switch -Regex ($k) {
+                'microsoftAuthenticator' { 'Microsoft Authenticator' }
+                'fido2' { 'FIDO2 Security Keys' }
+                'softwareOath' { 'Third-party Software OATH' }
+                'temporaryAccessPass' { 'Temporary Access Pass' }
+                'email' { 'Email OTP' }
+                'x509' { 'Certificate-based Authentication' }
+                'sms' { 'SMS' }
+                'voice' { 'Voice Calls' }
+                'hardwareOath' { 'Hardware OATH Tokens' }
+                default { $k }
+            }
+            $friendly[$name] = $rawMap[$k]
+        }
+
+        return [PSCustomObject]@{
+            Raw = $rawMap
+            Friendly = $friendly
+            Items = $items
+        }
+    }
+    catch {
+        Write-ColorOutput "Failed to read modern Authentication Methods policy: $_" -Color $Script:Colors.Warning
+        return [PSCustomObject]@{ Raw = @{}; Friendly = @{}; Items = @() }
+    }
+}
+
 function Test-EntraP1Requirement {
     Write-ColorOutput "`n=== Checking Tenant License (Entra ID P1+) ===" -Color $Script:Colors.Header
     try {
@@ -225,7 +312,7 @@ function Test-EntraP1Requirement {
 }
 
 function Get-AllUsers {
-    Write-ColorOutput "`n=== Retrieving User Information ===" -Color $Script:Colors.Header
+    if ($Script:ShowDetails) { Write-ColorOutput "`n=== Retrieving User Information ===" -Color $Script:Colors.Header }
     
     try {
         $users = @()
@@ -251,11 +338,11 @@ function Get-AllUsers {
             $nextLink = $response.'@odata.nextLink'
             $count += $response.value.Count
             
-            Write-ColorOutput "Retrieved $count users..." -Color $Script:Colors.Info
+            if ($Script:ShowDetails) { Write-ColorOutput "Retrieved $count users..." -Color $Script:Colors.Info }
             
         } while ($nextLink)
         
-        Write-ColorOutput "Total users retrieved: $($users.Count)" -Color $Script:Colors.Success
+        if ($Script:ShowDetails) { Write-ColorOutput "Total users retrieved: $($users.Count)" -Color $Script:Colors.Success }
         return $users
     }
     catch {
@@ -279,7 +366,7 @@ function Get-UserAuthenticationMethods {
     foreach ($user in $Users) {
         $processedCount++
         
-        if ($processedCount % 50 -eq 0) {
+        if ($Script:ShowDetails -and ($processedCount % 50 -eq 0)) {
             Write-ColorOutput "Processing user $processedCount of $totalUsers..." -Color $Script:Colors.Info
         }
         
@@ -462,6 +549,79 @@ function Get-AuthenticationMethodsRegistrationDetails {
         Write-ColorOutput "Failed to retrieve registration details: $_" -Color $Script:Colors.Error
         return @()
     }
+}
+
+function Get-RegisteredMethodsAggregateFromReports {
+    Write-ColorOutput "`n=== Aggregating Registered Methods From Reports ===" -Color $Script:Colors.Header
+    $registrationDetails = Get-AuthenticationMethodsRegistrationDetails
+    $set = [ordered]@{}
+    foreach ($rd in $registrationDetails) {
+        try {
+            $methods = $rd.methodsRegistered
+            if (-not $methods) { continue }
+            foreach ($m in $methods) { $set[$m] = ($set[$m] + 1) }
+        } catch { }
+    }
+    return [PSCustomObject]@{ Usage = $set; Raw = $registrationDetails }
+}
+
+function Build-LegacyVsModernComparison {
+    param(
+        [Parameter(Mandatory=$true)] $ModernConfig,
+        [Parameter(Mandatory=$true)] $RegistrationAggregate
+    )
+
+    $usage = @{}
+    if ($RegistrationAggregate -and $RegistrationAggregate.Usage) { $usage = $RegistrationAggregate.Usage } 
+
+    # Normalize keys to lower for safe lookup
+    $norm = @{}
+    foreach ($k in $usage.Keys) { $norm[$k.ToString().ToLower()] = [int]$usage[$k] }
+
+    function Get-Count([string]$key, [string[]]$alts) {
+        $sum = 0
+        if ($norm.ContainsKey($key)) { $sum += $norm[$key] }
+        foreach ($a in $alts) { if ($norm.ContainsKey($a)) { $sum += $norm[$a] } }
+        return $sum
+    }
+
+    $rows = @()
+    $defs = @(
+        @{ Method='SMS';                       RawId='sms';                       RegKeys=@('sms','mobilephone','alternativemobilephone'); },
+        @{ Method='Voice Call';                RawId='voice';                     RegKeys=@('officephone','voicecall'); },
+        @{ Method='Microsoft Authenticator';   RawId='microsoftAuthenticator';    RegKeys=@('appnotification'); },
+        @{ Method='Email OTP';                 RawId='email';                     RegKeys=@('email'); },
+        @{ Method='Temporary Access Pass';     RawId='temporaryAccessPass';       RegKeys=@('temporaryaccesspass'); },
+        @{ Method='Software OATH tokens';      RawId='softwareOath';              RegKeys=@('softwareoath','appcode'); },
+        @{ Method='Hardware OATH tokens';      RawId='hardwareOath';              RegKeys=@('hardwareoath'); },
+        @{ Method='FIDO2 Security Keys';       RawId='fido2';                     RegKeys=@('fido2','passkey'); },
+        @{ Method='Certificate-based authentication'; RawId='x509';               RegKeys=@('certificate','x509certificate'); }
+    )
+
+    foreach ($d in $defs) {
+        $count = 0
+        foreach ($rk in $d.RegKeys) { $count += Get-Count -key $rk -alts @() }
+        $modernState = if ($ModernConfig.Raw.ContainsKey($d.RawId)) { $ModernConfig.Raw[$d.RawId] } else { 'unknown' }
+        $modernEnabled = ($modernState -eq 'enabled')
+        $status = if ($count -gt 0 -and -not $modernEnabled) { 'Mismatch: legacy used, modern disabled' }
+                  elseif ($count -gt 0 -and $modernEnabled) { 'Aligned' }
+                  elseif ($count -eq 0 -and $modernEnabled) { 'Enabled but no legacy usage' }
+                  else { 'Not used' }
+        $recommendation = switch ($status) {
+            'Mismatch: legacy used, modern disabled' { 'Enable in Authentication Methods or plan replacement' }
+            'Aligned' { 'No action needed' }
+            'Enabled but no legacy usage' { 'Optional: keep enabled or scope to groups' }
+            default { 'Review if needed in modern policy' }
+        }
+        $rows += [PSCustomObject]@{
+            Method = $d.Method
+            LegacyUsageCount = $count
+            ModernState = if ($modernState) { ([string]$modernState).Substring(0,1).ToUpper() + ([string]$modernState).Substring(1) } else { 'Unknown' }
+            Status = $status
+            Recommendation = $recommendation
+        }
+    }
+    return $rows
 }
 
 function Get-CurrentPolicyStatus {
@@ -668,8 +828,112 @@ function Get-MigrationReadiness {
 
 #region Report Generation Functions
 
+function Build-AuthMethodsStatusRows {
+    param([Parameter(Mandatory=$true)] $ModernConfig)
+    $rows = @()
+    $defs = @(
+        @{ Method='SMS';                       Key='sms';                        Category='Essential'; SsprCapable='Yes';   RecEnabled='No action needed' },
+        @{ Method='Microsoft Authenticator';   Key='microsoftAuthenticator';     Category='Essential'; SsprCapable='Yes';   RecEnabled='No action needed' },
+        @{ Method='Email OTP';                 Key='email';                      Category='Essential'; SsprCapable='Yes';   RecEnabled='No action needed' },
+        @{ Method='Voice Calls';               Key='voice';                      Category='Essential'; SsprCapable='Yes';   RecEnabled='ENABLE BEFORE MIGRATION' },
+        @{ Method='Third-party Software OATH'; Key='softwareOath';               Category='Optional';  SsprCapable='No';    RecEnabled='Consider for enhanced security' },
+        @{ Method='Temporary Access Pass';     Key='temporaryAccessPass';        Category='Optional';  SsprCapable='No';    RecEnabled='Consider for enhanced security' },
+        @{ Method='Certificate-based Authentication'; Key='x509';                Category='Optional';  SsprCapable='No';    RecEnabled='Optional - can enable later' },
+        @{ Method='FIDO2 Security Keys';       Key='fido2';                      Category='Optional';  SsprCapable='No';    RecEnabled='Consider for enhanced security' },
+        @{ Method='Hardware OATH Tokens';      Key='hardwareOath';               Category='Optional';  SsprCapable='No';    RecEnabled='Consider for enhanced security' }
+    )
+
+    foreach ($d in $defs) {
+        $rawId = $d.Key
+        $state = if ($ModernConfig.Raw.ContainsKey($rawId)) { $ModernConfig.Raw[$rawId] } else { 'unknown' }
+        $item = $ModernConfig.Items | Where-Object { $_.Id -eq $rawId } | Select-Object -First 1
+        $target = if ($item -and $item.IncludeTargetsCount -gt 0) { 'Scoped to groups' } else { 'Not configured' }
+        $rows += [PSCustomObject]@{
+            Method = $d.Method
+            Status = if ($state) { ([string]$state).Substring(0,1).ToUpper() + ([string]$state).Substring(1) } else { 'Unknown' }
+            Category = $d.Category
+            SSPRCapable = $d.SsprCapable
+            Target = $target
+            Recommendation = if ($state -eq 'enabled') { if ($d.RecEnabled) { $d.RecEnabled } else { 'No action needed' } } else { $d.RecEnabled }
+            Badge = if ($d.Category -eq 'Essential') { 'ESSENTIAL' } else { 'Optional' }
+        }
+    }
+    return $rows
+}
+
+function Build-CombinedMethodsTableRows {
+    param(
+        [Parameter(Mandatory=$true)] $AuthMethodsStatus,
+        [Parameter(Mandatory=$true)] $LegacyVsModern
+    )
+
+    function Get-CanonicalKey([string]$name) {
+        $n = ($name | ForEach-Object { $_.ToLower() })
+        if ($n -match 'temporary') { return 'temporaryaccesspass' }
+        if ($n -match 'hardware' -and $n -match 'oath') { return 'hardwareoath' }
+        if ($n -match 'software' -and $n -match 'oath') { return 'softwareoath' }
+        if ($n -match 'authenticator') { return 'microsoftauthenticator' }
+        if ($n -match 'fido' -or $n -match 'passkey') { return 'fido2' }
+        if ($n -match 'certificate' -or $n -match 'x509') { return 'x509' }
+        if ($n -match 'voice') { return 'voice' }
+        if ($n -match 'email') { return 'email' }
+        if ($n -match 'sms') { return 'sms' }
+        return $n
+    }
+
+    # Build lookups
+    $modernByKey = @{}
+    foreach ($r in ($AuthMethodsStatus | Where-Object { $_ })) {
+        $k = Get-CanonicalKey $r.Method
+        $modernByKey[$k] = $r
+    }
+    $legacyByKey = @{}
+    foreach ($r in ($LegacyVsModern | Where-Object { $_ })) {
+        $k = Get-CanonicalKey $r.Method
+        $legacyByKey[$k] = $r
+    }
+
+    # Union of keys to show compact combined table
+    $allKeys = @($modernByKey.Keys + $legacyByKey.Keys | Select-Object -Unique)
+    $rows = @()
+    foreach ($k in $allKeys) {
+        $m = $modernByKey[$k]
+        $l = $legacyByKey[$k]
+        $methodName = if ($m) { $m.Method } elseif ($l) { $l.Method } else { $k }
+        $modernState = if ($m) { $m.Status } else { if ($l) { $l.ModernState } else { 'Unknown' } }
+        $target = if ($m) { $m.Target } else { 'Not configured' }
+        $category = if ($m) { $m.Category } else { 'Optional' }
+        $sspr = if ($m) { $m.SSPRCapable } else { 'No' }
+        $legacyUsage = if ($l) { [int]$l.LegacyUsageCount } else { 0 }
+        $status = if ($l -and $l.Status) { $l.Status } else {
+            if ($legacyUsage -gt 0 -and $modernState -ne 'Enabled') { 'Mismatch: legacy used, modern disabled' }
+            elseif ($legacyUsage -gt 0 -and $modernState -eq 'Enabled') { 'Aligned' }
+            elseif ($legacyUsage -eq 0 -and $modernState -eq 'Enabled') { 'Enabled but no legacy usage' }
+            else { 'Not used' }
+        }
+        $rec = switch ($status) {
+            'Mismatch: legacy used, modern disabled' { 'Enable in Authentication Methods or plan replacement' }
+            'Aligned' { 'No action needed' }
+            'Enabled but no legacy usage' { 'Optional: keep enabled or scope to groups' }
+            default { 'Review if needed in modern policy' }
+        }
+        $rows += [PSCustomObject]@{
+            Method = $methodName
+            ModernStatus = $modernState
+            Category = $category
+            SSPRCapable = $sspr
+            Target = $target
+            LegacyUsage = $legacyUsage
+            Status = $status
+            Recommendation = $rec
+            Badge = if ($category -eq 'Essential') { 'ESSENTIAL' } else { 'Optional' }
+        }
+    }
+    return $rows
+}
+
 function Get-ResourceEmailAddresses {
-    Write-ColorOutput "`n=== Discovering Resource Mailboxes (Rooms/Sharedmailboxes) ===" -Color $Script:Colors.Header
+    if ($Script:ShowDetails) { Write-ColorOutput "`n=== Discovering Resource Mailboxes (Rooms/Sharedmailboxes) ===" -Color $Script:Colors.Header }
     $resourceEmails = @()
     try {
         $uri = "https://graph.microsoft.com/v1.0/places/microsoft.graph.room?`$select=emailAddress&`$top=999"
@@ -699,7 +963,7 @@ function Get-ResourceEmailAddresses {
     }
     
     $clean = ($resourceEmails | Where-Object { $_ } | ForEach-Object { $_.ToLower() } | Select-Object -Unique)
-    Write-ColorOutput "Discovered $($clean.Count) resource addresses (rooms/sharedmailboxes)" -Color $Script:Colors.Info
+    if ($Script:ShowDetails) { Write-ColorOutput "Discovered $($clean.Count) resource addresses (rooms/sharedmailboxes)" -Color $Script:Colors.Info }
     return $clean
 }
 
@@ -712,16 +976,18 @@ function Export-CSVReports {
         $Statistics,
         
         [Parameter(Mandatory=$true)]
-        $Readiness
+        $Readiness,
+        [Parameter(Mandatory=$false)] $AuthMethodsStatus,
+        [Parameter(Mandatory=$false)] $LegacyVsModern
     )
     
-    Write-ColorOutput "`n=== Generating CSV Reports ===" -Color $Script:Colors.Header
+    if (-not $Script:IsQuiet) { Write-ColorOutput "`n=== Generating CSV Reports ===" -Color $Script:Colors.Header }
     
     try {
         # Main authentication methods report
         $mainReportPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}_Detailed.csv" -f $Script:TenantName)
         $AuthMethodsData | Export-Csv -Path $mainReportPath -NoTypeInformation
-        Write-ColorOutput "Detailed report exported: $mainReportPath" -Color $Script:Colors.Success
+        if (-not $Script:IsQuiet) { Write-ColorOutput "Detailed report exported: $mainReportPath" -Color $Script:Colors.Success }
         
         # Users needing action report
         $actionRequiredUsers = $AuthMethodsData | Where-Object {$_.NeedsAction}
@@ -729,13 +995,24 @@ function Export-CSVReports {
             $actionReportPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}_ActionRequired.csv" -f $Script:TenantName)
             $actionRequiredUsers | Select-Object UserPrincipalName, DisplayName, AuthenticationStrength, RequiredActions | 
                 Export-Csv -Path $actionReportPath -NoTypeInformation
-            Write-ColorOutput "Action required report exported: $actionReportPath" -Color $Script:Colors.Success
+            if (-not $Script:IsQuiet) { Write-ColorOutput "Action required report exported: $actionReportPath" -Color $Script:Colors.Success }
         }
         
         # Summary statistics
         $summaryPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}_Summary.csv" -f $Script:TenantName)
         $Statistics | Export-Csv -Path $summaryPath -NoTypeInformation
-        Write-ColorOutput "Summary statistics exported: $summaryPath" -Color $Script:Colors.Success
+        if (-not $Script:IsQuiet) { Write-ColorOutput "Summary statistics exported: $summaryPath" -Color $Script:Colors.Success }
+        
+        if ($AuthMethodsStatus -and $AuthMethodsStatus.Count -gt 0) {
+            $statusPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}_MethodsStatus.csv" -f $Script:TenantName)
+            $AuthMethodsStatus | Export-Csv -Path $statusPath -NoTypeInformation
+            if (-not $Script:IsQuiet) { Write-ColorOutput "Authentication Methods status exported: $statusPath" -Color $Script:Colors.Success }
+        }
+        if ($LegacyVsModern -and $LegacyVsModern.Count -gt 0) {
+            $comparePath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}_LegacyVsModern.csv" -f $Script:TenantName)
+            $LegacyVsModern | Export-Csv -Path $comparePath -NoTypeInformation
+            if (-not $Script:IsQuiet) { Write-ColorOutput "Legacy vs Modern comparison exported: $comparePath" -Color $Script:Colors.Success }
+        }
         
         return $true
     }
@@ -754,10 +1031,12 @@ function Export-ExcelReport {
         $Statistics,
         
         [Parameter(Mandatory=$true)]
-        $Readiness
+        $Readiness,
+        [Parameter(Mandatory=$false)] $AuthMethodsStatus,
+        [Parameter(Mandatory=$false)] $LegacyVsModern
     )
     
-    Write-ColorOutput "`n=== Generating Excel Report ===" -Color $Script:Colors.Header
+    if (-not $Script:IsQuiet) { Write-ColorOutput "`n=== Generating Excel Report ===" -Color $Script:Colors.Header }
     
     try {
         $excelPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}.xlsx" -f $Script:TenantName)
@@ -772,10 +1051,22 @@ function Export-ExcelReport {
                 Export-Excel -Path $excelPath -WorksheetName "Action Required" -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -TableName "ActionRequired" -TableStyle Medium2 -Append
         }
         
-        # Summary sheet (single row)
-        @($Statistics) | Export-Excel -Path $excelPath -WorksheetName "Summary" -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -TableName "Summary" -TableStyle Medium2 -Append
-        
-        Write-ColorOutput "Excel report generated: $excelPath" -Color $Script:Colors.Success
+        if ($AuthMethodsStatus -and $AuthMethodsStatus.Count -gt 0) {
+            $combinedForExcel = @()
+            try { $combinedForExcel = Build-CombinedMethodsTableRows -AuthMethodsStatus $AuthMethodsStatus -LegacyVsModern $LegacyVsModern } catch { $combinedForExcel = $null }
+            if ($combinedForExcel -and $combinedForExcel.Count -gt 0) {
+                # Use same recommendation/status logic as HTML by exporting the combined rows
+                $combinedForExcel | Export-Excel -Path $excelPath -WorksheetName "Auth Methods Status" -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -TableName "AuthMethodsStatus" -TableStyle Medium2 -Append
+            } else {
+                # Fallback to original status rows if combined not available
+                $AuthMethodsStatus | Export-Excel -Path $excelPath -WorksheetName "Auth Methods Status" -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -TableName "AuthMethodsStatus" -TableStyle Medium2 -Append
+            }
+        }
+        if ($LegacyVsModern -and $LegacyVsModern.Count -gt 0) {
+            $LegacyVsModern | Export-Excel -Path $excelPath -WorksheetName "Legacy vs Modern" -AutoSize -AutoFilter -FreezeTopRow -BoldTopRow -TableName "LegacyVsModern" -TableStyle Medium2 -Append
+        }
+
+        if (-not $Script:IsQuiet) { Write-ColorOutput "Excel report generated: $excelPath" -Color $Script:Colors.Success }
         return $true
     }
     catch {
@@ -799,10 +1090,16 @@ function Export-HTMLReport {
         $PolicyStatus,
         
         [Parameter(Mandatory=$false)]
-        $TenantInfo
+        $TenantInfo,
+        
+        [Parameter(Mandatory=$false)]
+        $AuthMethodsStatus,
+        
+        [Parameter(Mandatory=$false)]
+        $LegacyVsModern
     )
     
-    Write-ColorOutput "`n=== Generating HTML Report ===" -Color $Script:Colors.Header
+    if (-not $Script:IsQuiet) { Write-ColorOutput "`n=== Generating HTML Report ===" -Color $Script:Colors.Header }
     
     $htmlContent = @"
 <!DOCTYPE html>
@@ -1049,6 +1346,12 @@ function Export-HTMLReport {
             background: #ffc107;
             color: #333;
         }
+        /* Align method badges consistently */
+        .method-cell { display: grid; grid-template-columns: 1fr 100px; gap: 8px; align-items: center; }
+        .badge { display: inline-block; min-width: 90px; padding: 3px 8px; border-radius: 12px; font-size: 0.75em; text-align: center; }
+        .badge.essential { background: #dc3545; color: #fff; }
+        .badge.optional  { background: #e9ecef; color: #495057; }
+        /* Section divider removed */
         
         .footer {
             background: #f8f9fa;
@@ -1083,6 +1386,95 @@ function Export-HTMLReport {
         </div>
         
         <div class="content">
+            <!-- Migration Readiness Assessment -->
+            <div class="readiness-section">
+                <div class="readiness-header">
+                    <div>
+                        <h2>Migration Readiness Assessment</h2>
+                        <div class="readiness-status status-$(($Readiness.OverallStatus -replace ' ','').ToLower())">Status: $($Readiness.OverallStatus)</div>
+                    </div>
+                    <div style="font-size: 1.1em; color: #333; font-weight: 600;">Readiness Score: $($Readiness.ReadinessScore)/100</div>
+                </div>
+"@
+
+    if ($PolicyStatus) { $htmlContent += "<p style='margin: 0 0 10px 0; color: #666;'>Current Migration State: <strong>$($PolicyStatus.MigrationState)</strong></p>" }
+
+    $htmlContent += @"
+                <div class="issues-container">
+"@
+    if ($Readiness.CriticalIssues.Count -gt 0) {
+        $htmlContent += @"
+                    <div class="issue-box critical-issues">
+                        <h4>🚨 Critical Issues</h4>
+                        <ul>
+"@
+        foreach ($issue in $Readiness.CriticalIssues) { $htmlContent += "<li>$issue</li>" }
+        $htmlContent += @"
+                        </ul>
+                    </div>
+"@
+    }
+    if ($Readiness.Warnings.Count -gt 0) {
+        $htmlContent += @"
+                    <div class="issue-box warnings">
+                        <h4>⚠️ Warnings</h4>
+                        <ul>
+"@
+        foreach ($warning in $Readiness.Warnings) { $htmlContent += "<li>$warning</li>" }
+        $htmlContent += @"
+                        </ul>
+                    </div>
+"@
+    }
+    $htmlContent += @"
+                    <div class="issue-box recommendations">
+                        <h4>✅ Recommendations</h4>
+                        <ul>
+"@
+    foreach ($rec in $Readiness.Recommendations) { $htmlContent += "<li>$rec</li>" }
+    $htmlContent += @"
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Authentication Methods Status -->
+            <div class="table-container">
+                <h2>Authentication Methods Status</h2>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>Modern Status</th>
+                            <th>Category</th>
+                            <th>SSPR Capable</th>
+                            <th>Target</th>
+                            <th>Legacy Usage</th>
+                            <th>Status</th>
+                            <th>Recommendation</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"@
+
+    $combinedRows = @()
+    try { $combinedRows = Build-CombinedMethodsTableRows -AuthMethodsStatus $AuthMethodsStatus -LegacyVsModern $LegacyVsModern } catch { $combinedRows = @() }
+    if ($combinedRows -and $combinedRows.Count -gt 0) {
+        $rows = $combinedRows | Sort-Object @{Expression={ $_.Badge -eq 'ESSENTIAL' }; Descending=$true}, @{Expression={ $_.Method }; Ascending=$true}
+        foreach ($r in $rows) {
+            $modernColor = if ($r.ModernStatus -eq 'Enabled') { 'green' } elseif ($r.ModernStatus -eq 'Disabled') { 'red' } else { '#555' }
+            $statusColor = if ($r.Status -like 'Mismatch*') { 'red' } elseif ($r.Status -eq 'Aligned') { 'green' } else { '#555' }
+            $htmlContent += "<tr><td>$($r.Method)</td><td style='color:$modernColor;font-weight:600;'>$($r.ModernStatus)</td><td>$($r.Category)</td><td>$($r.SSPRCapable)</td><td>$($r.Target)</td><td>$($r.LegacyUsage)</td><td style='color:$statusColor;font-weight:600;'>$($r.Status)</td><td>$($r.Recommendation)</td></tr>"
+        }
+    } else {
+        $htmlContent += "<tr><td colspan='8' style='text-align:center;color:#666;'>Combined status not available</td></tr>"
+    }
+
+    $htmlContent += @"
+                    </tbody>
+                </table>
+            </div>
+
             <!-- Summary Statistics -->
             <div class="summary-grid">
                 <div class="summary-card">
@@ -1104,77 +1496,6 @@ function Export-HTMLReport {
                     <h3>Action Required</h3>
                     <div class="value">$($Statistics.UsersNeedingAction)</div>
                     <div class="subtitle">Users need configuration</div>
-                </div>
-            </div>
-            
-            <!-- Readiness Assessment -->
-            <div class="readiness-section">
-                <div class="readiness-header">
-                    <div>
-                        <h2>Migration Readiness Assessment</h2>
-                        <div class="readiness-status status-$(($Readiness.OverallStatus -replace ' ','').ToLower())">
-                            Status: $($Readiness.OverallStatus)
-                        </div>
-"@
-
-    if ($PolicyStatus) {
-        $htmlContent += "<p style='margin-top: 10px; color: #666;'>Current Migration State: <strong>$($PolicyStatus.MigrationState)</strong></p>"
-    }
-
-    $htmlContent += @"
-                    </div>
-                    <div style="font-size: 1.1em; color: #333; font-weight: 600;">
-                        Readiness Score: $($Readiness.ReadinessScore)/100
-                    </div>
-                </div>
-                
-                <div class="issues-container">
-"@
-
-    # Critical Issues
-    if ($Readiness.CriticalIssues.Count -gt 0) {
-        $htmlContent += @"
-                    <div class="issue-box critical-issues">
-                        <h4>🚨 Critical Issues</h4>
-                        <ul>
-"@
-        foreach ($issue in $Readiness.CriticalIssues) {
-            $htmlContent += "<li>$issue</li>"
-        }
-        $htmlContent += @"
-                        </ul>
-                    </div>
-"@
-    }
-
-    # Warnings
-    if ($Readiness.Warnings.Count -gt 0) {
-        $htmlContent += @"
-                    <div class="issue-box warnings">
-                        <h4>⚠️ Warnings</h4>
-                        <ul>
-"@
-        foreach ($warning in $Readiness.Warnings) {
-            $htmlContent += "<li>$warning</li>"
-        }
-        $htmlContent += @"
-                        </ul>
-                    </div>
-"@
-    }
-
-    # Recommendations
-    $htmlContent += @"
-                    <div class="issue-box recommendations">
-                        <h4>✅ Recommendations</h4>
-                        <ul>
-"@
-    foreach ($rec in $Readiness.Recommendations) {
-        $htmlContent += "<li>$rec</li>"
-    }
-    $htmlContent += @"
-                        </ul>
-                    </div>
                 </div>
             </div>
             
@@ -1263,6 +1584,13 @@ function Export-HTMLReport {
             </div>
 "@
 
+    # Add note below Users Requiring Action table
+    $htmlContent += @"
+            <div style="margin-top: 14px; background: #e8f4ff; color: #084298; border: 1px solid #b6daff; padding: 12px 14px; border-radius: 8px; font-size: 1em;">
+                <strong>Note:</strong> The full lists users are included in the Excel export (see the sheets).
+            </div>
+"@
+
     $htmlContent += @"
             
             <!-- Distribution Summary -->
@@ -1314,7 +1642,7 @@ function Export-HTMLReport {
     try {
         $htmlPath = Join-Path $OutputPath ("AuthMethods_MigrationReport_{0}.html" -f $Script:TenantName)
         $htmlContent | Out-File -FilePath $htmlPath -Encoding UTF8
-        Write-ColorOutput "HTML report generated: $htmlPath" -Color $Script:Colors.Success
+        if (-not $Script:IsQuiet) { Write-ColorOutput "HTML report generated: $htmlPath" -Color $Script:Colors.Success }
         return $true
     }
     catch {
@@ -1329,7 +1657,8 @@ function Export-HTMLReport {
 
 function Main {
     # Pretty banner
-    Write-ColorOutput (@"
+    if (-not $Script:IsQuiet) {
+        Write-ColorOutput (@"
 
 =========================================================================
     MICROSOFT ENTRA ID AUTHENTICATION METHODS MIGRATION AUDIT
@@ -1338,6 +1667,7 @@ function Main {
 =========================================================================
 "@
 ) -Color $Script:Colors.Header
+    }
 
     # Test prerequisites
     Test-Prerequisites
@@ -1370,14 +1700,15 @@ function Main {
             $notRoom -and $notUnlicensed
         }
         $after = $users.Count
-        Write-ColorOutput "Filtered resources/unlicensed: $before -> $after users" -Color $Script:Colors.Info
+        if ($Script:ShowDetails) { Write-ColorOutput "Filtered resources/unlicensed: $before -> $after users" -Color $Script:Colors.Info }
     }
 
     # Get authentication methods for all users
     $authMethodsData = Get-UserAuthenticationMethods -Users $users
     
-    # Get registration details
-    $registrationDetails = Get-AuthenticationMethodsRegistrationDetails
+    # Get registration details and aggregate legacy usage via Graph (no MSOnline)
+    $registrationAggregate = Get-RegisteredMethodsAggregateFromReports
+    $registrationDetails = $registrationAggregate.Raw
     
     # Get current policy status (optional)
     $policyStatus = $null
@@ -1387,6 +1718,11 @@ function Main {
     
     # Calculate statistics
     $statistics = Get-MigrationStatistics -AuthMethodsData $authMethodsData -RegistrationDetails $registrationDetails
+    
+    # Build Authentication Methods Status (modern policy)
+    $modernConfig = Get-ModernAuthMethodConfigurations
+    $authMethodsStatus = Build-AuthMethodsStatusRows -ModernConfig $modernConfig
+    $legacyVsModern = Build-LegacyVsModernComparison -ModernConfig $modernConfig -RegistrationAggregate $registrationAggregate
     
     # Assess migration readiness
     $readiness = Get-MigrationReadiness -Statistics $statistics -PolicyStatus $policyStatus
@@ -1398,28 +1734,32 @@ function Main {
         elseif ($readiness.OverallStatus -eq "Partially Ready") { $Script:Colors.Warning }
         else { $Script:Colors.Error }
     )
-    Write-ColorOutput "Readiness Score: $($readiness.ReadinessScore)/100" -Color $Script:Colors.Info
-    Write-ColorOutput "Total Users: $($statistics.TotalUsers)" -Color $Script:Colors.Info
-    Write-ColorOutput "MFA Coverage: $($statistics.MFAPercentage)%" -Color $Script:Colors.Info
-    Write-ColorOutput "Users Needing Action: $($statistics.UsersNeedingAction)" -Color $(
-        if ($statistics.UsersNeedingAction -eq 0) { $Script:Colors.Success }
-        else { $Script:Colors.Warning }
-    )
+    if (-not $Script:IsQuiet) {
+        Write-ColorOutput "Readiness Score: $($readiness.ReadinessScore)/100" -Color $Script:Colors.Info
+        Write-ColorOutput "Total Users: $($statistics.TotalUsers)" -Color $Script:Colors.Info
+        Write-ColorOutput "MFA Coverage: $($statistics.MFAPercentage)%" -Color $Script:Colors.Info
+        Write-ColorOutput "Users Needing Action: $($statistics.UsersNeedingAction)" -Color $(
+            if ($statistics.UsersNeedingAction -eq 0) { $Script:Colors.Success }
+            else { $Script:Colors.Warning }
+        )
+    }
     
     # Export reports
     if ($ExportExcel) {
-        Export-ExcelReport -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness | Out-Null
+        Export-ExcelReport -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness -AuthMethodsStatus $authMethodsStatus -LegacyVsModern $legacyVsModern | Out-Null
     }
     if ($ExportCSV) {
-        Export-CSVReports -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness | Out-Null
+        Export-CSVReports -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness -AuthMethodsStatus $authMethodsStatus -LegacyVsModern $legacyVsModern | Out-Null
     }
 
     if ($ExportHTML) {
-        Export-HTMLReport -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness -PolicyStatus $policyStatus -TenantInfo $tenantInfo | Out-Null
+        Export-HTMLReport -AuthMethodsData $authMethodsData -Statistics $statistics -Readiness $readiness -PolicyStatus $policyStatus -TenantInfo $tenantInfo -AuthMethodsStatus $authMethodsStatus -LegacyVsModern $legacyVsModern | Out-Null
     }
     
     Write-ColorOutput "`n=== AUDIT COMPLETE ===" -Color $Script:Colors.Success
-    Write-ColorOutput "Reports have been saved to: $OutputPath" -Color $Script:Colors.Info
+    if (-not $Script:IsQuiet) {
+        Write-ColorOutput "Reports have been saved to: $OutputPath" -Color $Script:Colors.Info
+    }
     
     # Disconnect from Microsoft Graph
     Disconnect-MgGraph | Out-Null

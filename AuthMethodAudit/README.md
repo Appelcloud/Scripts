@@ -1,23 +1,23 @@
 # Entra Authentication Methods Migration Audit
 
-This repository contains a PowerShell script that audits your Microsoft Entra ID tenant for the migration from legacy MFA/SSPR to the unified Authentication Methods policy (MC678069). It produces a tenant‑named Excel workbook and an HTML report with clear guidance and counts.
+This repository contains a PowerShell script that audits your Microsoft Entra ID tenant for the migration from legacy MFA/SSPR to the unified Authentication Methods policy (MC678069). It produces a tenant‑named Excel workbook and an HTML report with clear guidance, a combined legacy→modern mapping, and actionable recommendations.
 
 ## What It Does
 
-- Reads user accounts and their registered authentication methods
-- Assesses MFA coverage and “strong vs. weak” methods
-- Highlights users who need action, including users who must “Register email or phone for SSPR”
-- Optionally reads your current Authentication Methods policy status
-- Optionally discovers resource accounts (rooms/workspaces) and excludes them
+- Enumerates user accounts and their registered authentication methods (Graph).
+- Assesses MFA coverage and “strong vs. weak” methods.
+- Highlights users who need action.
+- Reads the Authentication Methods policy configuration (Graph beta)
+- Compares legacy usage (from registration reports) with modern configuration to show alignment vs. gaps
 - Exports:
-  - Excel workbook with multiple sheets (Detailed, Action Required, Summary)
-  - HTML dashboard report
+  - Excel workbook with multiple sheets (Detailed, Action Required, Auth Methods Status, Legacy vs Modern)
+  - HTML dashboard report with Migration Readiness at the top and a combined “Authentication Methods Status” table
  
 ## DEMO
 
 HTML report
 
-<img width="2551" height="1220" alt="CleanShot 2025-09-11 at 19 32 10" src="https://github.com/user-attachments/assets/e914e1cf-3772-43e2-b922-6d02ee648d3e" />
+<img width="2511" height="1203" alt="CleanShot 2025-09-13 at 00 02 00" src="https://github.com/user-attachments/assets/5094a698-3bd0-42ae-856b-7f736adf65f5" />
 
 
 EXCEL FILE
@@ -34,16 +34,16 @@ EXCEL FILE
   - ImportExcel (only if Excel export is enabled)
 - Directory role: Global Administrator or Authentication Policy Administrator
 
-## Least‑Privilege Graph Permissions
+## Graph Permissions Requested
 
-The script connects to Microsoft Graph with minimal delegated scopes by default:
+The script connects to Microsoft Graph with delegated scopes:
 
-- `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `Organization.Read.All`
+- Always: `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `Organization.Read.All`, `Policy.Read.All`
+- Optional: `Place.Read.All` when excluding resources (default); don't pass `-IncludeResources` to avoid requesting Places.
 
-Optional scopes are only requested when you opt into related features:
-
-- `Policy.Read.All` when using `-IncludePolicyStatus`
-- `Place.Read.All` when excluding resources (default behavior; used to discover rooms/workspaces). Pass `-IncludeResources` to avoid requesting this scope.
+Notes:
+- Modern policy read uses the beta endpoint with `$expand=authenticationMethodConfigurations`.
+- Legacy usage is taken from the authentication methods registration reports.
 
 Tip: If your consent screen shows a very large list, someone may have previously consented to extra scopes for the shared Graph CLI app. You can leave “Consent on behalf of your organization” unchecked for ad‑hoc runs.
 
@@ -72,7 +72,9 @@ Outputs are saved to the current folder as:
 - `-ExportExcel`: Generate Excel workbook (default: on)
 - `-ExportCSV`: Also produce CSV files (default: off)
 - `-IncludeResources`: Include resource accounts (shared mailboxes/rooms). If omitted, the script discovers rooms/sharedmailboxes and excludes them, and also excludes unlicensed mailboxes.
-- `-IncludePolicyStatus`: Include current Authentication Methods policy state (adds `Policy.Read.All`)
+- `-IncludePolicyStatus`: Show current policy migration state (preMigration/migrationInProgress/etc.)
+- `-Quiet`: Reduce console spam. Default: off (verbose)
+- `-ShowDetails`: Print detailed progress such as user retrieval counts and resource discovery (default: off)
 
 Examples:
 
@@ -90,12 +92,13 @@ Examples:
 - Excel workbook `AuthMethods_MigrationReport_<TenantName>.xlsx` with sheets:
   - **Detailed Report**: All users and detected methods
   - **Action Required**: Users where `NeedsAction` is true OR the only required action is “Register email or phone for SSPR”
-  - **Summary**: One row with aggregate statistics
+  - **Auth Methods Status**: Combined comparison of legacy usage and modern policy, including the same alignment Status and Recommendation as the HTML
+  - **Legacy vs Modern**: Underlying comparison rows (one per method), for further filtering/pivoting
 - HTML dashboard `AuthMethods_MigrationReport_<TenantName>.html` with:
-  - Summary KPIs, readiness score, and risk categories
-  - Authentication Methods distribution
-  - Prominent note pointing to Excel for the full user lists
-  - “Users Requiring Immediate Action” table (top 50; see Excel for full set)
+  - Migration Readiness Assessment at the top (overall status and score)
+  - Authentication Methods Status (combined legacy vs modern) table
+  - Summary cards, risk categories, and methods distribution
+  - “Users Requiring Action” table (top 50), with a note that full lists are in the Excel export
 
 ## Resource Filtering Behavior
 
@@ -112,6 +115,7 @@ The script verifies Entra ID P1/P2 via `subscribedSkus`. If not found, it stops 
 
 - Excel auto‑fit warnings on macOS/Linux: harmless; ImportExcel cannot auto‑size without certain OS components.
 - No users in HTML “Action Required”, but you see them in Excel: The HTML shows the first 50; the full list is in the Excel sheet.
+- Policy read 400/badRequest: Ensure `Policy.Read.All` is consented; this script requests it by default. The policy read uses `$expand` with the beta endpoint.
 
 ## Security Notes
 
@@ -121,4 +125,3 @@ The script verifies Entra ID P1/P2 via `subscribedSkus`. If not found, it stops 
 ## Feedback / Contributions
 
 Issues and PRs are welcome for improvements, bug fixes, or additional report sections.
-
