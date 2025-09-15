@@ -160,8 +160,9 @@ function Connect-MicrosoftGraph {
             "User.Read.All",
             "UserAuthenticationMethod.Read.All",
             "Reports.Read.All",
+            "AuditLog.Read.All",
             "Organization.Read.All",
-            "Policy.Read.All"  # Needed to read authentication methods policy/configurations
+            "Policy.Read.All"
         )
         if ($IncludePolicyStatus) { $requiredScopes += "Policy.Read.All" }
         if (-not $IncludeResources) { $requiredScopes += "Place.Read.All" }
@@ -547,6 +548,10 @@ function Get-AuthenticationMethodsRegistrationDetails {
     }
     catch {
         Write-ColorOutput "Failed to retrieve registration details: $_" -Color $Script:Colors.Error
+        $msg = [string]$_
+        if ($msg -match 'Authentication_MSGraphPermissionMissing' -or $msg -match 'AuditLog.Read.All') {
+            Write-ColorOutput "Hint: This endpoint now requires Graph scope 'AuditLog.Read.All' in addition to 'Reports.Read.All'. Re-run and consent when prompted, or have an admin grant consent." -Color $Script:Colors.Warning
+        }
         return @()
     }
 }

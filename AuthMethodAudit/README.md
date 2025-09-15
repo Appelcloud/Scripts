@@ -38,7 +38,11 @@ EXCEL FILE
 
 The script connects to Microsoft Graph with delegated scopes:
 
+<<<<<<< HEAD
 - Always: `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `Organization.Read.All`, `Policy.Read.All`
+=======
+- Always: `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `AuditLog.Read.All`, `Organization.Read.All`, `Policy.Read.All`
+>>>>>>> Dev
 - Optional: `Place.Read.All` when excluding resources (default); don't pass `-IncludeResources` to avoid requesting Places.
 
 Notes:
