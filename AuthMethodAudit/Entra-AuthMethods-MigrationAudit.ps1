@@ -162,7 +162,7 @@ function Connect-MicrosoftGraph {
             "Reports.Read.All",
             "AuditLog.Read.All",
             "Organization.Read.All",
-            "Policy.Read.All"
+            "Policy.Read.All"  # Needed to read authentication methods policy/configurations
         )
         if ($IncludePolicyStatus) { $requiredScopes += "Policy.Read.All" }
         if (-not $IncludeResources) { $requiredScopes += "Place.Read.All" }
@@ -264,11 +264,13 @@ function Get-ModernAuthMethodConfigurations {
             $friendly[$name] = $rawMap[$k]
         }
 
-        return [PSCustomObject]@{
+        $result = [PSCustomObject]@{
             Raw = $rawMap
             Friendly = $friendly
             Items = $items
         }
+        Write-ColorOutput "Complete" -Color $Script:Colors.Success
+        return $result
     }
     catch {
         Write-ColorOutput "Failed to read modern Authentication Methods policy: $_" -Color $Script:Colors.Warning
@@ -544,6 +546,7 @@ function Get-AuthenticationMethodsRegistrationDetails {
         } while ($uri)
         
         Write-ColorOutput "Retrieved registration details for $($registrationDetails.Count) users" -Color $Script:Colors.Success
+        Write-ColorOutput "Complete" -Color $Script:Colors.Success
         return $registrationDetails
     }
     catch {
@@ -557,8 +560,8 @@ function Get-AuthenticationMethodsRegistrationDetails {
 }
 
 function Get-RegisteredMethodsAggregateFromReports {
-    Write-ColorOutput "`n=== Aggregating Registered Methods From Reports ===" -Color $Script:Colors.Header
     $registrationDetails = Get-AuthenticationMethodsRegistrationDetails
+    Write-ColorOutput "`n=== Aggregating Registered Methods From Reports ===" -Color $Script:Colors.Header
     $set = [ordered]@{}
     foreach ($rd in $registrationDetails) {
         try {
@@ -567,6 +570,7 @@ function Get-RegisteredMethodsAggregateFromReports {
             foreach ($m in $methods) { $set[$m] = ($set[$m] + 1) }
         } catch { }
     }
+    Write-ColorOutput "Complete" -Color $Script:Colors.Success
     return [PSCustomObject]@{ Usage = $set; Raw = $registrationDetails }
 }
 
@@ -734,6 +738,7 @@ function Get-MigrationStatistics {
         }
     }
     
+    Write-ColorOutput "Complete" -Color $Script:Colors.Success
     return $stats
 }
 
@@ -1748,6 +1753,7 @@ function Main {
             else { $Script:Colors.Warning }
         )
     }
+    Write-ColorOutput "Complete" -Color $Script:Colors.Success
     
     # Export reports
     if ($ExportExcel) {
