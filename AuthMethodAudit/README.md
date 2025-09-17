@@ -17,8 +17,7 @@ This repository contains a PowerShell script that audits your Microsoft Entra ID
 
 HTML report
 
-<img width="2511" height="1203" alt="CleanShot 2025-09-13 at 00 02 00" src="https://github.com/user-attachments/assets/5094a698-3bd0-42ae-856b-7f736adf65f5" />
-
+<img width="2535" height="1222" alt="CleanShot 2025-09-17 at 13 17 35" src="https://github.com/user-attachments/assets/121a248a-97c3-4ed0-9911-87a664c3708a" />
 
 EXCEL FILE
 
@@ -38,11 +37,7 @@ EXCEL FILE
 
 The script connects to Microsoft Graph with delegated scopes:
 
-<<<<<<< HEAD
-- Always: `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `Organization.Read.All`, `Policy.Read.All`
-=======
 - Always: `User.Read.All`, `UserAuthenticationMethod.Read.All`, `Reports.Read.All`, `AuditLog.Read.All`, `Organization.Read.All`, `Policy.Read.All`
->>>>>>> Dev
 - Optional: `Place.Read.All` when excluding resources (default); don't pass `-IncludeResources` to avoid requesting Places.
 
 Notes:
