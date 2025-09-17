@@ -27,7 +27,6 @@ EXCEL FILE
 ## Requirements
 
 - PowerShell 7+ (recommended) or Windows PowerShell 5.1
-- Microsoft Entra ID P1 or P2 license in the tenant
 - Modules (installed automatically unless `-SkipModuleCheck` is used):
   - Microsoft.Graph PowerShell SDK
   - ImportExcel (only if Excel export is enabled)
@@ -105,10 +104,6 @@ Examples:
   - Uses Graph Places (rooms/workspaces) to identify resource email addresses
   - Excludes unlicensed accounts to catch most shared mailboxes
 - Pass `-IncludeResources` to include these accounts and avoid requesting Places permissions
-
-## License Check (P1/P2)
-
-The script verifies Entra ID P1/P2 via `subscribedSkus`. If not found, it stops with an error. If you prefer a warning‑only mode, you can adapt the function `Test-EntraP1Requirement` accordingly.
 
 ## Troubleshooting
 
