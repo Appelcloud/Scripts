@@ -1208,6 +1208,8 @@ function Export-HTMLReport {
         }
         .status-ready { color: #28a745; }
         .status-partial { color: #ffc107; }
+        /* Alias for dynamic class generated from "Partially Ready" */
+        .status-partiallyready { color: #ffc107; }
         .status-notready { color: #dc3545; }
         
         /* pie chart removed */
@@ -1398,7 +1400,7 @@ function Export-HTMLReport {
                 <div class="readiness-header">
                     <div>
                         <h2>Migration Readiness Assessment</h2>
-                        <div class="readiness-status status-$(($Readiness.OverallStatus -replace ' ','').ToLower())">Status: $($Readiness.OverallStatus)</div>
+                        <div class="readiness-status">Status: <span class="status-$(($Readiness.OverallStatus -replace ' ','').ToLower())">$($Readiness.OverallStatus)</span></div>
                     </div>
                     <div style="font-size: 1.1em; color: #333; font-weight: 600;">Readiness Score: $($Readiness.ReadinessScore)/100</div>
                 </div>
