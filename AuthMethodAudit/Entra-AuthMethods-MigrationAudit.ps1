@@ -933,6 +933,7 @@ function Build-CombinedMethodsTableRows {
             Category = $category
             SSPRCapable = $sspr
             Target = $target
+            LegacyStatus = if ($legacyUsage -gt 0) { 'Used' } else { 'Not used' }
             LegacyUsage = $legacyUsage
             Status = $status
             Recommendation = $rec
@@ -1391,10 +1392,6 @@ function Export-HTMLReport {
     $htmlContent += @"
         </div>
         
-        <div class="deadline-banner">
-            ⚠️ DEADLINE: September 30, 2025 - Legacy MFA and SSPR policies will be retired.
-        </div>
-        
         <div class="content">
             <!-- Migration Readiness Assessment -->
             <div class="readiness-section">
@@ -1458,7 +1455,7 @@ function Export-HTMLReport {
                             <th>Modern Status</th>
                             <th>Category</th>
                             <th>SSPR Capable</th>
-                            <th>Target</th>
+                            <th>Legacy Status</th>
                             <th>Legacy Usage</th>
                             <th>Status</th>
                             <th>Recommendation</th>
@@ -1474,7 +1471,7 @@ function Export-HTMLReport {
         foreach ($r in $rows) {
             $modernColor = if ($r.ModernStatus -eq 'Enabled') { 'green' } elseif ($r.ModernStatus -eq 'Disabled') { 'red' } else { '#555' }
             $statusColor = if ($r.Status -like 'Mismatch*') { 'red' } elseif ($r.Status -eq 'Aligned') { 'green' } else { '#555' }
-            $htmlContent += "<tr><td>$($r.Method)</td><td style='color:$modernColor;font-weight:600;'>$($r.ModernStatus)</td><td>$($r.Category)</td><td>$($r.SSPRCapable)</td><td>$($r.Target)</td><td>$($r.LegacyUsage)</td><td style='color:$statusColor;font-weight:600;'>$($r.Status)</td><td>$($r.Recommendation)</td></tr>"
+            $htmlContent += "<tr><td>$($r.Method)</td><td style='color:$modernColor;font-weight:600;'>$($r.ModernStatus)</td><td>$($r.Category)</td><td>$($r.SSPRCapable)</td><td>$($r.LegacyStatus)</td><td>$($r.LegacyUsage)</td><td style='color:$statusColor;font-weight:600;'>$($r.Status)</td><td>$($r.Recommendation)</td></tr>"
         }
     } else {
         $htmlContent += "<tr><td colspan='8' style='text-align:center;color:#666;'>Combined status not available</td></tr>"
